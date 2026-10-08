@@ -24,12 +24,12 @@ Phase 1 runs locally, but calls to OpenAI and remote nutritional APIs require ne
 
 ## 2. Core Architecture Principles
 
-The Agent orchestrates independent services and first identifies request intent (`IntentRouter`):
+The Agent identifies request intent and coordinates a small set of focused functions; a separate `IntentRouter` class is not required:
 
 ```text
 USER INPUT
     ↓
-INTENT ROUTER / AGENT
+AGENT (intent identification)
     ├── MEAL_ONLY / MEAL_AND_CORRECTION
     │   Images + initial food / single reference detection
     │       ↓
@@ -39,9 +39,8 @@ INTENT ROUTER / AGENT
     │       ↓
     │   AI carbohydrate estimate     NutritionService + portion estimate
     │                    ↘           ↙
-    │                  CarbValidationService
-    │                         ↓
-    │                  UncertaintyManager
+    │          Simple Python comparison
+    │             and uncertainty rules
     │                         ↓
     │             Carbohydrate result
     └── CORRECTION_ONLY
@@ -53,7 +52,7 @@ MEAL_AND_CORRECTION or CORRECTION_ONLY, in test context only:
     validated numerical inputs → deterministic DoseCalculator → simulation result
 ```
 
-The Agent runs tools, obtains user confirmations, maintains short-term state, and explains results; the LLM does not directly calculate insulin or change settings. Nutrition-service data and an AI estimate may share a mistaken portion-size assumption: agreement does **not** establish accuracy. A separate `UncertaintyManager` decides whether to show a qualified estimate, request focused clarification, or declare insufficient data. `RecentInsulinReminderService` is distinct from dose calculation, and a configurable reminder interval is **not** an insulin activity calculation. Mathematical correctness is distinct from clinical safety. Simulations must never be presented as actual injection instructions.
+The Agent runs tools, obtains user confirmations, maintains short-term state, and explains results; the LLM does not directly calculate insulin or change settings. Nutrition-service data and an AI estimate may share a mistaken portion-size assumption: agreement does **not** establish accuracy. Simple validation and uncertainty logic decides whether to show a qualified estimate, request focused clarification, or declare insufficient data. A small recent-injection reminder function is distinct from dose calculation, and a configurable reminder interval is **not** an insulin activity calculation. Mathematical correctness is distinct from clinical safety. Simulations must never be presented as actual injection instructions.
 
 ---
 
@@ -62,11 +61,11 @@ The Agent runs tools, obtains user confirmations, maintains short-term state, an
 - Python and FastAPI.
 - OpenAI API with Vision and OpenAI Agents SDK.
 - Configurable OpenAI model (e.g. `OPENAI_VISION_MODEL` environment variable); select a final model through measured accuracy, cost and reliability rather than hard-coding a model name.
-- `NutritionService` with modular adapters for USDA FoodData Central, Open Food Facts, and an Israeli nutrition dataset **subject to feasibility and source validation**.
-- Local JSON/file storage, optional local nutrition cache including source and retrieval metadata.
+- A minimal nutrition lookup using **USDA FoodData Central** for Phase 1; additional providers may be added later if needed.
+- Local JSON/file storage; a nutrition cache is optional and should be added only if justified by actual use.
 - Pydantic validation and automated tests with pytest.
 
-Normalize serving units, cooking state and database carbohydrate definitions, including treatment of fiber, before comparing data. Handle failed lookups and source disagreement explicitly; do not fabricate entries. No database server in Phase 1. Keep core services independent of Phase 2 Flutter management, messaging channels (WhatsApp primary; Telegram fallback), Firebase Authentication, and PostgreSQL storage. Channel-specific adapters must not own agent logic.
+Normalize serving units, cooking state and database carbohydrate definitions, including treatment of fiber, before comparing data. Handle failed lookups and source disagreement explicitly; do not fabricate entries. Favor one simple Vision integration for initial detection and post-confirmation analysis, and small Python functions for comparison, uncertainty and reminders. Do not require separate classes or files for each step. No database server in Phase 1. Keep core services independent of Phase 2 Flutter management, messaging channels (WhatsApp primary; Telegram fallback), Firebase Authentication, and PostgreSQL storage. Channel-specific adapters must not own agent logic.
 
 ---
 
@@ -130,7 +129,7 @@ total_calculated_dose = meal_bolus + correction_bolus
 
 `MEAL_ONLY` for a carbohydrate estimate does **not** invoke DoseCalculator. `CORRECTION_ONLY` can invoke only the correction simulation without images or a carbohydrate figure. `MEAL_AND_CORRECTION` computes components separately and then sums them. Do not silently round, silently default missing values, or calculate from an unvalidated estimate. Return components separately where applicable.
 
-These formulas omit insulin-on-board, previous dosing, CGM trends, exercise and other clinical factors. `RecentInsulinReminderService` may warn about disclosed recent insulin **before** displaying a simulation, but is not part of the formula; being outside a reminder window never constitutes clearance to give insulin. Do not present these outputs as recommendations to inject.
+These formulas omit insulin-on-board, previous dosing, CGM trends, exercise and other clinical factors. A simple reminder function may warn about disclosed recent insulin **before** displaying a simulation, but is not part of the formula; being outside a reminder window never constitutes clearance to give insulin. Do not present these outputs as recommendations to inject.
 
 ---
 
@@ -331,7 +330,7 @@ Two estimators contribute after food confirmation:
 1. **AI direct estimate:** Vision interprets identified foods, portion size and carbohydrate content; reports uncertainty.
 2. **Nutrition database estimate:** `NutritionService` retrieves suitable per-weight or per-serving carb data; Python combines values with estimated portion weights/serving sizes and handles unit normalization and source provenance.
 
-`CarbValidationService` compares estimates and investigates significant disagreement. Small difference is **not proof** of accuracy (both may share the same wrong portion estimate). Large difference never automatically means the database is correct: request reliable extra evidence or provide an uncertainty-qualified result. Measured weight and precise product nutrition label take precedence over image guesses where applicable. No final selection thresholds are clinically or statistically validated yet; calibrate using real weighed meals.
+Simple Python validation logic compares estimates and investigates significant disagreement. Small difference is **not proof** of accuracy (both may share the same wrong portion estimate). Large difference never automatically means the database is correct: request reliable extra evidence or provide an uncertainty-qualified result. Measured weight and precise product nutrition label take precedence over image guesses where applicable. No final selection thresholds are clinically or statistically validated yet; calibrate using real weighed meals.
 
 The LLM does not perform insulin dose calculations: that belongs only to deterministic Python simulation.
 
@@ -352,9 +351,9 @@ Vision portion-size estimate with optional confirmed scale
     ↓
 AI carbs estimate + NutritionService estimate
     ↓
-CarbValidationService (sources, agreement, discrepancy)
+Simple comparison (sources, agreement, discrepancy)
     ↓
-UncertaintyManager
+Simple uncertainty rules
     ├── enough information → qualified final carb estimate
     ├── useful clarification → ask for another image/weight/portion info
     └── insufficient information → explain limits; do not fabricate
@@ -379,7 +378,7 @@ The Agent must not fabricate current glucose, treatment parameters, missing food
 
 ## 24. Agent Tools
 
-Suggested narrow-purpose tools/services:
+Suggested narrow-purpose capabilities (functions may share a module; each line does **not** require a separate class or tool):
 
 ```text
 classify_request_intent()
@@ -398,7 +397,7 @@ calculate_correction_bolus()     # simulation only
 calculate_total_bolus()          # simulation only
 ```
 
-Do **not** implement `add_reference`, `list_references`, `update_reference`, `delete_reference` as conversational Phase 1 tools. Those are Phase 2 app/backend management operations, not conversational editing tools in WhatsApp. Keep service code separate from Agent prompting. Reference configuration is one local object; database cache is separate from settings.
+Do **not** implement `add_reference`, `list_references`, `update_reference`, `delete_reference` as conversational Phase 1 tools. Those are Phase 2 app/backend management operations, not conversational editing tools in WhatsApp. Keep deterministic calculation code separate from Agent prompting. Reference configuration is one local object; nutrition caching is not required in Phase 1.
 
 ---
 
@@ -442,7 +441,7 @@ Request only relevant clarifications, such as another angle, package nutrition, 
 
 ## 27. Uncertainty Handling
 
-Implement `UncertaintyManager` using **per-food** evidence along five axes:
+Implement simple uncertainty checks (without requiring a separate decision-engine class) using **per-food** evidence along five axes:
 
 1. Confirmed identification of each food.
 2. Portion-size quality and uncertainty.
@@ -505,54 +504,33 @@ Do not establish arbitrary confidence thresholds as clinically safe. Evaluate pi
 
 ## 31. Suggested Project Structure
 
+Prefer the existing repository layout and make minimal changes. One possible **lightweight** Phase 1 layout is:
+
 ```text
 DiaMate/
 ├── app/
 │   ├── main.py
-│   ├── agent/
-│   │   └── diabetes_agent.py
-│   ├── services/
-│   │   ├── intent_router.py
-│   │   ├── meal_detection.py
-│   │   ├── meal_vision.py
-│   │   ├── nutrition_service.py
-│   │   ├── carb_validation.py
-│   │   ├── uncertainty_manager.py
-│   │   ├── dose_calculator.py
-│   │   ├── reference_service.py
-│   │   └── recent_insulin_reminder.py
-│   ├── nutrition_adapters/
-│   │   ├── usda.py
-│   │   ├── open_food_facts.py
-│   │   └── israeli_foods.py   # feasibility to be confirmed
-│   ├── models/
-│   │   ├── meal.py
-│   │   ├── treatment_settings.py
-│   │   └── reference_object.py
-│   └── config.py
+│   ├── agent.py
+│   ├── vision.py          # detect first, estimate after confirmation
+│   ├── nutrition.py       # USDA lookup + simple comparison/uncertainty
+│   ├── calculator.py      # deterministic simulations only
+│   ├── models.py
+│   └── storage.py         # local JSON and one reference object
 ├── data/
-│   ├── settings.json        # private; gitignored
-│   ├── reference/
-│   │   ├── reference.json
-│   │   └── reference.jpg
-│   └── nutrition_cache/
+│   ├── settings.json      # private; gitignored
+│   └── reference/
+│       ├── reference.json
+│       └── reference.jpg
 ├── tests/
-│   ├── test_dose_calculator.py
-│   ├── test_reference_service.py
-│   ├── test_meal_detection.py
-│   ├── test_nutrition_service.py
-│   ├── test_carb_validation.py
-│   ├── test_uncertainty_manager.py
-│   ├── test_intent_router.py
-│   └── test_recent_insulin_reminder.py
 ├── settings.example.json
-├── .env
+├── .env                   # private; gitignored
 ├── .gitignore
 ├── requirements.txt
+├── AGENTS.md
 └── PROJECT.md
 ```
 
-This is a **proposed** layout, not proof these files exist. Do not commit real private treatment data or secrets. The local test interface may be API-based or a simple browser chat; WhatsApp and standalone mobile interfaces are later integrations.
+This is **illustrative**, not a mandatory restructuring or proof the files exist. Related functions may share modules; introduce new files, classes, adapters or caching only when useful. Do not rewrite working code merely to match this tree. Do not commit private treatment data or secrets. A minimal local API/test interface is sufficient; WhatsApp and Flutter belong to Phase 2.
 
 ---
 
@@ -568,7 +546,7 @@ Do **not** implement in Phase 1:
 - Complete insulin-on-board model or production clinical safety clearance.
 - Conversational registration, multi-object management, user editing or removal of references.
 - Editing/recalculating an already finalized meal.
-- Complex 3D camera reconstruction as a Phase 1 dependency.
+- Complex 3D camera reconstruction, multiple nutritional-provider adapters, or dedicated nutrition caching as Phase 1 dependencies.
 - Automatically asserting that a reminder time window determines residual insulin activity.
 
 The Phase 2 and Phase 3 roadmap is specified in section 34; these systems remain outside Phase 1.
@@ -634,7 +612,7 @@ Clearly label result as test-only / non-actionable
 
 Use the confirmed meal analysis plus correction-specific inputs; invoke separately verified meal and correction calculations and sum using one tested integration path. Maintain clear component separation and non-actionable simulation labeling.
 
-**Across all flows:** support multi-turn current-request context; unit tests and invalid-input behaviors pass; original meal cannot be retroactively edited in Phase 1; uncertainty is communicated and unsupported estimates are not fabricated; evaluation on an initial 20–30 reference meals is documented; do not characterize mathematical or image accuracy as clinical safety.
+**Across all flows:** use existing model/SDK capabilities and focused Python functions rather than custom frameworks; support multi-turn current-request context; unit tests and invalid-input behaviors pass; original meal cannot be retroactively edited in Phase 1; uncertainty is communicated and unsupported estimates are not fabricated; evaluation on an initial 20–30 reference meals is documented; do not characterize mathematical or image accuracy as clinical safety.
 
 ---
 
@@ -751,194 +729,213 @@ Phase 1 is still local-first and precedes Flutter, WhatsApp and the multi-user d
 
 ## 36. Source of Truth and Change Control
 
-This document is the source of truth for **DiaMate project scope and the approved high-level roadmap** as of October 8, 2026.
+This document is the source of truth for **DiaMate project requirements, architecture, scope, approved roadmap, and development progress** as of October 8, 2026.
+
+### Document Responsibilities
 
 - Sections **1–33** specify the Phase 1 build in detail.
-- Section **34** records the Phase 2/3 roadmap and deferred options; roadmap requirements still require implementation-stage refinement.
+- Section **34** defines the approved Phase 2/3 roadmap and deferred capabilities. Roadmap requirements may require further refinement before implementation.
 - Section **35** contains cross-phase non-negotiable behavior and safety boundaries.
-- Section **37** tracks implementation progress; checklist completion never overrides requirements or safety rules.
-- If a detailed implementation conflicts with this document, prefer the requirements here unless the user explicitly approves a change.
-- Do not silently reinterpret a planned capability as implemented or a proposed provider integration as approved.
-- Revisit the roadmap when Meta/WhatsApp or CGM-provider eligibility, clinical review, validation results or user requirements materially change.
+- Section **37** serves as the central, living development checklist and tracks implementation progress.
+- **`AGENTS.md`** defines the development workflow, responsibilities, permissions, and rules for AI development agents working on DiaMate.
+
+### Development Agent Rules
+
+- AI development agents must follow both `PROJECT.md` and `AGENTS.md`.
+- `PROJECT.md` defines **what must be built**.
+- `AGENTS.md` defines **how development work must be performed**.
+- If instructions in `AGENTS.md` conflict with product requirements in `PROJECT.md`, the conflict must be reported and resolved with the user before proceeding.
+- All development tasks must originate from Section 37 and require explicit user authorization.
+- Tasks may only be marked `[x]` after implementation, verification, and explicit user approval.
+- New tasks may only be added to Section 37 after user approval.
+- After each approved task, the development agent must review whether relevant sections of `PROJECT.md` require updates.
+
+### Change Control
+
+- `PROJECT.md` must remain accurate and up to date throughout development.
+- Do not modify product requirements, architecture, or scope without explicit user approval.
+- Approved changes must be reflected in the relevant sections of `PROJECT.md`.
+- Preserve unrelated documentation and existing checklist entries when making updates.
+- If implementation conflicts with the specification, report the conflict rather than silently modifying the requirements.
+- Do not treat planned capabilities as implemented or proposed integrations as approved.
+- Revisit the roadmap when Meta/WhatsApp or CGM-provider eligibility, clinical review, validation results, or user requirements materially change.
+
+**`PROJECT.md` and `AGENTS.md` must remain consistent throughout the development lifecycle.**
 
 ---
 
 ## 37. Development Checklist & Progress Tracking
 
-This section tracks small, verifiable implementation tasks across all approved phases. It is a **living implementation tracker**, not a replacement for Sections 1–36.
+This section is DiaMate's central, living development task board. Tasks are grouped by phase. Parent tasks contain small, independently verifiable subtasks only where useful. Implementation, approval, completion marking, and changes to this checklist follow `AGENTS.md`.
 
-**Checklist rules**
-
-- `[ ]` = not yet verified as complete; `[x]` = implemented, tested, and verified against the relevant requirements.
-- Tasks are **not** automatically complete because a design was approved or code was written. Mark completion only after checking the code and relevant test results.
-- A task may be checked only with a brief factual record of evidence (test result, reviewed behavior, or other validation), supplied in a commit, pull request, or development summary.
-- If a task becomes obsolete or scope changes, obtain project-owner approval and update both the requirements and this checklist rather than silently deleting or checking it.
-- Never use task completion as a substitute for medical validation, privacy review, platform approval, or provider authorization.
-- **All tasks below start unchecked:** completion status has not been audited against the current repository. Previously implemented items should be checked only after verification.
-- Track changes to this checklist in version control alongside the code; future `AGENTS.md` instructions should define how AI development agents update it.
+**Implementation principle:** Prefer existing OpenAI model capabilities, SDKs, and proven libraries over custom frameworks. Tasks describe verifiable outcomes, **not** a requirement to create a separate class, service, file, or model for every item. Keep the approved user flows and safeguards intact.
 
 ### Phase 1 — Local AI Core
 
-#### 1A. Repository and local environment
-- [ ] Verify existing repository structure, dependencies, and runnable FastAPI skeleton.
-- [ ] Set up documented local Python environment and dependency installation.
-- [ ] Configure environment variables for OpenAI model and credentials; prevent secret commits.
-- [ ] Add reliable application startup and basic health endpoint.
-- [ ] Add a simple local testing interface/API supporting text and image uploads.
-- [ ] Establish a reproducible `pytest` setup and baseline test command.
+#### 1A. Foundation and local testing
 
-#### 1B. Treatment settings and deterministic simulation
-- [ ] Define Pydantic model for the six approved treatment/reminder settings.
-- [ ] Add `settings.example.json` with unset values and local private `settings.json` storage.
-- [ ] Validate loaded settings and reject missing, invalid, or impossible inputs.
-- [ ] Implement safe settings reads/writes and appropriate `.gitignore` rules.
-- [ ] Implement independent meal-bolus simulation function.
-- [ ] Implement independent correction-bolus simulation function.
-- [ ] Implement combined mathematical result from the two independent functions.
-- [ ] Ensure correction-only requests need no meal image or carb estimate.
-- [ ] Keep simulation output clearly non-actionable and separate from safety checks.
-- [ ] Implement the user-configured recent-injection reminder as a separate service.
-- [ ] Test meal simulation cases and invalid/boundary inputs.
-- [ ] Test correction simulation cases, limits, and invalid/boundary inputs.
-- [ ] Test one combined orchestration scenario and recent-injection reminders.
+- [ ] Verify and prepare the existing Python/FastAPI project.
+  - [ ] Inspect the current repository and run the existing application.
+  - [ ] Set up/document dependencies and the local run command; resolve startup blockers.
+- [ ] Configure OpenAI access securely.
+  - [ ] Load the API key and configurable model from environment variables.
+  - [ ] Ensure `.env`, keys, and personal data cannot be accidentally committed.
+- [ ] Provide a minimal local test interface.
+  - [ ] Accept conversational text and one or more photos for a single request.
+  - [ ] Reject unsupported or invalid uploads; verify a basic application health check.
+- [ ] Set up `pytest` and run the baseline test suite.
 
-#### 1C. Single predefined Reference Object
-- [ ] Choose, photograph, and measure one real reference object.
-- [ ] Save its image and local JSON configuration.
-- [ ] Define and validate the reusable `ReferenceObject` model.
-- [ ] Load reference metadata/image without crashing if missing or invalid.
-- [ ] Detect a possible reference match from a meal image using Vision.
-- [ ] Require explicit user confirmation before using dimensions.
-- [ ] Continue estimation without a reference when none is present or confirmed.
-- [ ] Test matching, rejection, and missing-reference behavior.
+#### 1B. Conversational Agent, Vision and single reference object
 
-#### 1D. Food detection and conversations
-- [ ] Implement initial image-based food/component detection with structured output.
-- [ ] Accept one image by default and multiple images for the same meal.
-- [ ] Incorporate user-provided food descriptions and intended eaten fraction.
-- [ ] Present detected foods and possible reference for explicit confirmation.
-- [ ] Support add/remove/replace corrections before final analysis.
-- [ ] Preserve structured meal state over multiple chat turns.
-- [ ] Implement intent routing for `MEAL_ONLY`, `CORRECTION_ONLY`, and `MEAL_AND_CORRECTION`.
-- [ ] Ensure correction-only requests bypass food detection and reference matching.
-- [ ] Prevent final carb estimation and meal simulation before food confirmation.
-- [ ] Test multi-turn confirmation, correction, and intent routing.
+- [ ] Initialize the OpenAI Agents SDK using the existing project structure.
+  - [ ] Implement basic multi-turn conversation and identify `MEAL_ONLY`, `CORRECTION_ONLY`, and `MEAL_AND_CORRECTION` requests.
+  - [ ] Verify that each request invokes only relevant functions; correction-only does not require photos.
+- [ ] Implement **one simple Vision integration** for meal analysis, using the same model for two stages.
+  - [ ] Detect visible foods/components and output a structured food list.
+  - [ ] Show the food list to the user; support confirmation and add/remove/replace corrections.
+  - [ ] Only after confirmation, estimate per-food portions and direct AI carbohydrates with uncertainty ranges.
+- [ ] Support multiple photographs and user-supplied portion context.
+  - [ ] Treat multiple photos as one meal; use one photo by default.
+  - [ ] Apply descriptions and intended eaten fraction supplied before finalization; request another photo or clarification only if useful.
+- [ ] Configure the single predefined Reference Object for Phase 1.
+  - [ ] Choose and measure an object; save its image and dimensions locally.
+  - [ ] Attempt identification with Vision and require explicit user confirmation before using its dimensions.
+  - [ ] Verify meal estimation continues if the object is absent, rejected, or its configuration is invalid.
+- [ ] Preserve the current request's confirmed information across messages.
+  - [ ] Maintain food confirmations, images, reference status and needed inputs without mixing requests.
+  - [ ] Do not provide final carb results before food confirmation or allow editing/recomputing a finalized Phase 1 meal.
 
-#### 1E. Portion and carbohydrate estimation
-- [ ] Implement confirmed-meal portion estimation with weight/size uncertainty ranges.
-- [ ] Use confirmed reference dimensions as approximate scale context when available.
-- [ ] Support clarification requests and additional photos only when useful.
-- [ ] Implement a direct AI carbohydrate estimate per identified food.
-- [ ] Implement `NutritionService` with modular provider adapters.
-- [ ] Add an initial supported nutrition database lookup and source metadata.
-- [ ] Handle nutritional definitions, serving units, preparation state, and missing fields.
-- [ ] Add local cache for retrieved nutritional values.
-- [ ] Calculate database-based carbohydrate estimate from food and portion inputs.
-- [ ] Implement `CarbValidationService` for per-food and meal-level comparisons.
-- [ ] Implement `UncertaintyManager` to decide estimate, clarification, or insufficient data.
-- [ ] Do not treat agreement of AI and database paths as proof of accuracy.
-- [ ] Test calculation paths, nutritional mapping, provenance, and uncertainty outcomes.
+#### 1C. Carbohydrate estimation and uncertainty
 
-#### 1F. Agent and response experience
-- [ ] Connect the OpenAI Agents SDK to narrow, well-defined service tools.
-- [ ] Make tools respect the agent's intent routing and confirmation requirements.
-- [ ] Return the approved balanced response: per-food carbs, total, range, confidence, explanation.
-- [ ] Support user-requested detailed breakdown including sources and estimated portions.
-- [ ] Clearly separate nutritional estimates from any insulin simulation.
-- [ ] Handle missing glucose/settings/reference data without inventing values.
-- [ ] Do not implement editing/recomputing finalized meals in Phase 1.
-- [ ] Verify end-to-end reference-supported and reference-free meal conversations.
-- [ ] Verify end-to-end correction-only and combined simulation conversations.
+- [ ] Implement a minimal USDA FoodData Central nutrition lookup.
+  - [ ] Retrieve an appropriate food entry and its carbohydrate data, source, serving units and preparation state.
+  - [ ] Handle missing results, unit differences and lookup errors without invented values.
+- [ ] Calculate the database-based carbohydrate estimate in Python.
+  - [ ] Combine verified nutrition values with estimated portion sizes, noting uncertain weights.
+  - [ ] Keep AI-derived and database-derived estimates and their sources separately available.
+- [ ] Compare the AI and database estimates with simple validation logic.
+  - [ ] Identify material disagreements per food and for the total meal; do not automatically prefer either estimate.
+  - [ ] Recognize that both methods may share an incorrect portion-size estimate.
+- [ ] Handle uncertainty and missing information without a separate complex decision engine.
+  - [ ] Evaluate food identity, portion confidence, nutrition source, disagreement and missing ingredients.
+  - [ ] Return an appropriately qualified estimate, ask a focused question, or say the available evidence is insufficient; do not invent safe-looking numeric thresholds.
+- [ ] Provide the approved balanced meal response.
+  - [ ] Show carbohydrates per food, estimated total, range, confidence and a concise explanation.
+  - [ ] On request, show portion estimates, database sources and AI/database comparisons.
+- [ ] Test the nutrition calculations, disagreements, missing data and confirmation boundaries.
 
-#### 1G. Evaluation and Phase 1 completion
-- [ ] Assemble 20–30 documented test meals with ground-truth or reliable comparison data where available.
-- [ ] Evaluate initial food-detection accuracy against user-confirmed labels.
-- [ ] Measure weight/portion and carbohydrate estimation error and uncertainty calibration.
-- [ ] Compare one-photo versus additional-photo test conditions.
-- [ ] Compare outcomes with and without the predefined Reference Object.
-- [ ] Compare direct AI estimates with nutrition-database estimates and failure cases.
-- [ ] Document model choice, API costs, limitations, and measurable results.
-- [ ] Run all automated tests and complete the two Phase 1 end-to-end acceptance flows.
-- [ ] Review non-negotiable rules and keep insulin calculation capabilities simulation-only.
+#### 1D. Treatment settings and dose simulation
 
-### Phase 2 — Multi-User Product, Flutter and WhatsApp
+- [ ] Store and validate the six approved settings locally.
+  - [ ] Provide a Pydantic model and a nonpersonal example configuration with unset values.
+  - [ ] Read/write the private JSON safely; reject missing or invalid values without medical defaults.
+- [ ] Implement a small, deterministic Python dose **simulation** calculator.
+  - [ ] Implement and unit-test the independent meal component.
+  - [ ] Implement and unit-test the independent correction component, including the maximum-drop cap.
+  - [ ] Sum the components in one combined-path integration test, with no implicit rounding.
+- [ ] Support correction-only and combined simulation conversations.
+  - [ ] Correction-only asks for relevant glucose/settings, bypassing Vision and meal questions.
+  - [ ] Combined requests keep the meal and correction components distinct.
+- [ ] Implement the configurable recent-injection reminder with a simple function.
+  - [ ] Check a user-disclosed injection time against the chosen reminder window.
+  - [ ] Treat missing injection information as unknown; never equate the window with insulin-on-board.
+- [ ] Enforce simulation-only presentation.
+  - [ ] Keep insulin math outside the LLM and separate from reminder/safety logic.
+  - [ ] Verify user-visible responses do not instruct real insulin administration.
 
-#### 2A. Persistent multi-user backend
-- [ ] Design PostgreSQL schema for users, settings, conversations, meals, insulin events and references.
-- [ ] Add database migrations and backup/recovery approach.
-- [ ] Integrate Firebase Authentication and backend token verification.
-- [ ] Enforce user-specific authorization on every sensitive endpoint and stored record.
-- [ ] Implement invite-only closed beta onboarding.
-- [ ] Migrate Phase 1 settings and reference data through appropriate services.
-- [ ] Store structured meal results, glucose entries, reported injections, and minimal necessary chat state.
-- [ ] Define retention, deletion, and secure image storage behavior.
-- [ ] Test access isolation across multiple accounts and recovery from failures.
+#### 1E. Integration, evaluation and acceptance
 
-#### 2B. Flutter management application
-- [ ] Implement registration/login and account management.
-- [ ] Implement viewing and editing settings with explicit user confirmation and validation.
-- [ ] Implement multiple Reference Objects: create, image upload, dimensions, update, delete.
-- [ ] Implement viewing structured meal/glucose/injection history.
-- [ ] Provide controls for account data deletion, privacy, and WhatsApp linking status.
-- [ ] Implement 'Talk to DiaMate' action that opens a prefilled WhatsApp chat.
-- [ ] Keep agent conversation and food-image analysis outside the Flutter app.
+- [ ] Verify complete local conversations.
+  - [ ] Run meal-only flows with and without a confirmed reference, including confirmation/correction and multiple turns.
+  - [ ] Run correction-only and combined simulation flows without inappropriate tools or real-dose recommendations.
+- [ ] Assemble an initial set of 20–30 documented meals with measured or otherwise reliable comparison data.
+  - [ ] Record photos, food identities, portions/weights, nutritional references and any reference-object conditions.
+  - [ ] Include simple foods and mixed dishes with sauces or uncertain portions.
+- [ ] Evaluate estimation quality against the test meals.
+  - [ ] Measure food-detection, portion-weight and carb-estimation errors, and whether reported ranges cover observed values.
+  - [ ] Compare one versus multiple photos, and with versus without the reference object.
+  - [ ] Compare AI and USDA pathways; identify large errors reported with high confidence.
+- [ ] Document the tested model, observed API costs, limitations and results.
+- [ ] Run the full automated test suite and verify all four Phase 1 acceptance flows and Section 35 safeguards.
 
-#### 2C. WhatsApp integration (eligibility-dependent)
-- [ ] Verify current Meta eligibility for the intended health-related AI service and data use.
-- [ ] Confirm WhatsApp Business Cloud API setup and production access requirements.
-- [ ] Implement a provider-neutral `MessagingAdapter` contract.
-- [ ] Implement secure one-time account linking through an app-initiated WhatsApp message.
-- [ ] Handle inbound text/images, media retrieval, message delivery, retries, and duplicates.
-- [ ] Restore the right user and conversation state across independent WhatsApp messages.
-- [ ] Make the bot reply to user-initiated interactions only; no unsolicited outreach.
-- [ ] Support image-based meal analysis, confirmations, questions, and detailed breakdown via chat.
-- [ ] Permit reading settings via WhatsApp; route settings changes to Flutter.
-- [ ] Add unlink/relink handling and prohibit revealing data for unmatched/unverified accounts.
-- [ ] Implement Telegram adapter only if the fallback is needed and approved.
+### Phase 2 — Multi-user product, Flutter management and WhatsApp
+
+#### 2A. Accounts, persistence and shared backend
+
+- [ ] Set up PostgreSQL for user-scoped data with straightforward models and migrations.
+  - [ ] Store users, settings, reference metadata, conversations, meals, glucose reports and reported injections as appropriate.
+  - [ ] Keep reported injections separate from simulated calculation outputs.
+- [ ] Integrate Firebase Authentication.
+  - [ ] Verify Firebase identity tokens in FastAPI and connect them to user records.
+  - [ ] Enforce and test account ownership on all private data operations.
+- [ ] Persist relevant user data and minimal conversation state.
+  - [ ] Save meal results, settings, references and active conversation context across restarts.
+  - [ ] Protect stored images, define retention/deletion, and document basic backup/recovery.
+- [ ] Support invite-only onboarding for the initial closed beta.
+
+#### 2B. Minimal Flutter management app
+
+- [ ] Implement sign-in and basic account management using Firebase SDK.
+- [ ] Allow viewing/editing treatment settings in Flutter with validation and explicit confirmation.
+- [ ] Allow users to create, photograph, list, edit and delete their own Reference Objects.
+- [ ] Display saved meal, carbohydrate, glucose and reported-injection history.
+- [ ] Provide account privacy/deletion controls and messaging-link status.
+- [ ] Add a **Talk to DiaMate on WhatsApp** button with prefilled linking message when needed; keep the Agent conversation outside Flutter.
+
+#### 2C. WhatsApp as the messaging channel (subject to eligibility)
+
+- [ ] Confirm Meta platform eligibility, health-data requirements and production API access **before** deploying real user data.
+- [ ] Implement a minimal messaging adapter using official WhatsApp Cloud API.
+  - [ ] Receive/authenticate text and photos and send user-initiated conversation replies.
+  - [ ] Handle media, duplicates, failures and basic retry/idempotency safely.
+- [ ] Securely link the app account to the WhatsApp sender.
+  - [ ] Generate a short-lived single-use token embedded in the app's prefilled message.
+  - [ ] Verify/link server-side; support unlink/relink and deny access to unlinked senders.
+- [ ] Connect WhatsApp messages to the existing Agent and per-user conversation state.
+  - [ ] Support photo analysis, confirmation, clarification and detailed breakdown requests.
+  - [ ] Permit reading settings through chat but direct changes to Flutter; never initiate unsolicited chats.
+- [ ] Implement a Telegram adapter **only if** WhatsApp is unavailable and the user separately approves the fallback.
 
 #### 2D. Closed beta and launch readiness
-- [ ] Perform authentication, privacy, security, and multi-user separation testing.
-- [ ] Test reliability and conversational recovery under duplicate/delayed messages.
-- [ ] Track operational errors, API usage, and per-user costs without exposing sensitive data in logs.
-- [ ] Gather closed-beta usability and portion-estimation feedback with appropriate safeguards.
-- [ ] Assess legal, platform, data protection, and applicable medical-safety obligations before real-user availability.
-- [ ] Decide public-launch timing only after the required readiness reviews; do not equate closed beta with clinical validation.
 
-### Phase 3 — Automatic CGM and Glucose Intelligence
+- [ ] Test authentication, user separation, privacy and secure storage/deletion.
+- [ ] Test conversational reliability across restarts, repeated messages and delayed media.
+- [ ] Monitor errors, API use and costs without storing secrets or unnecessary medical content in logs.
+- [ ] Run a small invite-only usability and carbohydrate-estimation beta and document findings.
+- [ ] Review platform, privacy, security and applicable clinical/regulatory requirements before real-user or public launch.
+- [ ] Make a separate go/no-go decision for public launch; a successful technical beta does not validate clinical dosing.
 
-#### 3A. Authorized provider integration
-- [ ] Check approved API access and geographic/device limitations for Libre and Dexcom.
-- [ ] Select a supported provider for the first authorized automatic integration.
-- [ ] Implement a provider-neutral `CGMService` and provider-specific adapter.
-- [ ] Implement user authorization, connection, refresh, and revocation flows.
-- [ ] Automatically sync the authorized CGM data without manual file import.
-- [ ] Normalize units, timestamps, freshness, provenance, and incomplete readings.
-- [ ] Avoid duplicate records and handle delayed/missing readings and provider outages.
-- [ ] Allow user disconnection and removal of imported data.
+### Phase 3 — Automatic CGM synchronization and insights
 
-#### 3B. Data access, visualization, and analysis
-- [ ] Display latest available glucose with its measurement time and staleness status.
-- [ ] Show trend information only when reliable provider data supports it.
-- [ ] Display glucose history, charts, averages, time-in-range, and time-below-range with coverage checks.
-- [ ] Link CGM records to documented meals and injections without inventing missing entries.
-- [ ] Analyze post-meal glucose trajectories and recurring temporal patterns.
-- [ ] Answer historical glucose questions through the agent using grounded data.
-- [ ] State missing data, limitations, and the difference between correlation and causation.
+#### 3A. Authorized automatic CGM integration
 
-#### 3C. Clinician discussion insights and report
-- [ ] Generate evidence-linked treatment-review discussion topics, without numerical change instructions.
-- [ ] Never autonomously modify treatment settings or prescribe dose changes.
-- [ ] Generate a user-requested clinician report with metrics, relevant events, patterns, and questions.
-- [ ] Distinguish raw CGM measurements, calculations, and tentative AI interpretations.
-- [ ] Evaluate clinical safety, legal scope, data accuracy and access requirements before enabling real-user functionality.
-- [ ] Test report accuracy, edge cases, missing data handling, and privacy controls.
+- [ ] Verify approved access, regional/device support and permissions for Libre and Dexcom; choose **one feasible provider first**.
+- [ ] Implement automatic synchronization through its official/authorized integration.
+  - [ ] Obtain and manage user authorization and connection/revocation.
+  - [ ] Retrieve readings automatically and save timestamp, source and user ownership.
+  - [ ] Normalize units; handle gaps, stale data, duplicates and temporary outages.
+- [ ] Let users disconnect and remove imported CGM data.
+- [ ] Add another provider only after a separately approved need and supported access; no manual CSV/import workflow in Phase 3.
+
+#### 3B. Glucose display and grounded analysis
+
+- [ ] Show the latest available glucose, measurement time and data freshness; show provider-supported trend when reliable.
+- [ ] Display historical graphs and deterministic summary metrics (averages, time in range/below range), including data gaps.
+- [ ] Correlate recorded meals/injections with CGM timestamps without inventing missing events.
+- [ ] Analyze descriptive post-meal changes and recurring patterns, distinguishing correlation from causation.
+- [ ] Let the Agent answer history questions using retrieved measurements and verified computed summaries.
+
+#### 3C. Clinician-discussion insights and report
+
+- [ ] Identify evidence-supported patterns and produce **non-prescriptive** discussion questions for the treating clinician.
+- [ ] Generate a user-requested, exportable report with CGM metrics, documented events, uncertainties and questions.
+- [ ] Keep measured readings, computed statistics and tentative AI interpretations clearly separated.
+- [ ] Test report accuracy, missing-data behavior, data ownership and clinical/regulatory readiness before enabling applicable real-user features.
+- [ ] Never autonomously change treatment settings or provide numeric instructions to alter insulin doses or ratios.
 
 ### Deferred / Optional — Not committed to Phases 1–3
 
-- [ ] Reassess editing and recalculating previously finalized meals if needed.
-- [ ] Consider additional messaging interfaces beyond the selected primary/fallback channels.
-- [ ] Evaluate proactive notifications or CGM forecasting only through a separately approved safety review.
-- [ ] Consider any clinically validated dose-adjustment support as a separate explicitly approved project.
-
-**Maintenance note:** When implementation work begins, review this checklist alongside the relevant detailed sections and keep each task's completion status accurate. Approval of the specification is not proof that a feature has been built.
-
+- [ ] Reassess editing and recalculating finalized meals if requested and approved.
+- [ ] Consider additional messaging interfaces only after explicit approval.
+- [ ] Evaluate proactive alerts or CGM forecasting only through a separate safety and scope review.
+- [ ] Treat any clinically validated dosing-adjustment support as a separately approved future project.
